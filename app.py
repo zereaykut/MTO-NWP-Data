@@ -1,31 +1,102 @@
-import logging
 import datetime as dt
-from src.components.gfs import GFSDownloader
-from src.components.ecmwf import ECMWFDownloader
-from src.components.icon import IconDownloader
-from src.components.arpage import ArpegeDownloader
+from pathlib import Path
+import sys
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Ensure src is in the python path
+sys.path.append(str(Path(__file__).parent))
 
-def run_pipeline():
-    # Use UTC for meteorological runs
-    now = dt.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+from src.components.gfs import download_gfs
+from src.components.ecmwf import download_ecmwf
+from src.components.icon import download_icon
+from src.components.arpage import download_arpege
+
+def main():
+    # Define a base output directory
+    base_dir = Path("weather_data")
+    base_dir.mkdir(exist_ok=True)
     
-    models = {
-        "gfs": GFSDownloader(output_dir="./data/gfs"),
-        "ecmwf": ECMWFDownloader(output_dir="./data/ecmwf"),
-        "icon": IconDownloader(output_dir="./data/icon"),
-        "arpege": ArpegeDownloader(output_dir="./data/arpege")
-    }
+    # Use the current UTC time to approximate the latest runs
+    now = dt.datetime.now(dt.timezone.utc)
+    
+    print(f"--- Starting Meteorological Data Downloader ---")
+    print(f"Reference Time (UTC): {now.isoformat()}")
+    print("-" * 50)
 
-    for name, downloader in models.items():
-        logging.info(f"Starting {name} download sequence...")
-        steps = downloader.get_forecast_steps(now, domain="default")
-        for step in steps[:5]:  # Limit for demo
-            urls = downloader.build_urls("default", now, step)
-            for url in urls:
-                filename = url.split("/")[-1]
-                downloader.download(url, filename)
+    # ---------------------------------------------------------
+    # 1. GFS Example
+    # ---------------------------------------------------------
+    print("\n>>> Fetching GFS (0.25 Degree)...")
+    try:
+        # GFS runs every 6 hours (00, 06, 12, 18). 
+        # We'll let the module auto-detect the latest run by passing run=None.
+        download_gfs(
+            domain="gfs025",
+            output_dir=base_dir / "gfs",
+            run=None,                # Auto-detect latest
+            max_forecast_hour=3,     # Just download first 3 hours for demo
+            use_aws=False            # Use NOMADS (faster for recent data)
+        )
+    except Exception as e:
+        print(f"GFS Error: {e}")
+
+    # ---------------------------------------------------------
+    # 2. ECMWF Example
+    # ---------------------------------------------------------
+    print("\n>>> Fetching ECMWF (IFS 0.4°)...")
+    try:
+        # ECMWF Open Data usually runs 00, 06, 12, 18.
+        # We explicitly calculate a run time for demonstration.
+        # (Subtract 6 hours to ensure data availability on their server)
+        safe_run_time = now - dt.timedelta(hours=6)
+        floored_hour = (safe_run_time.hour // 6) * 6
+        ecmwf_run = safe_run_time.replace(hour=floored_hour, minute=0, second=0, microsecond=0)
+
+        download_ecmwf(
+            domain="ifs04",
+            output_dir=base_dir / "ecmwf",
+            run=ecmwf_run,
+            max_forecast_hour=3      # Keep it small
+        )
+    except Exception as e:
+        print(f"ECMWF Error: {e}")
+
+    # ---------------------------------------------------------
+    # 3. ICON Example
+    # ---------------------------------------------------------
+    print("\n>>> Fetching ICON (Global)...")
+    try:
+        # ICON global runs 00, 06, 12, 18
+        icon_run = now - dt.timedelta(hours=4) # Small buffer
+        floored_hour = (icon_run.hour // 6) * 6
+        icon_run = icon_run.replace(hour=floored_hour, minute=0, second=0, microsecond=0)
+
+        download_icon(
+            domain="icon",
+            run=icon_run,
+            variables=["temperature_2m", "cloud_cover"], # Only specific vars
+            output_dir=base_dir / "icon",
+            max_steps=2 # Only first 2 steps
+        )
+    except Exception as e:
+        print(f"ICON Error: {e}")
+
+    # ---------------------------------------------------------
+    # 4. ARPEGE Example
+    # ---------------------------------------------------------
+    print("\n>>> Fetching ARPEGE (Europe)...")
+    try:
+        # Let the module guess the last run
+        download_arpege(
+            domain="arpege_europe",
+            output_dir=base_dir / "arpege",
+            run=None,
+            max_forecast_hour=3
+        )
+    except Exception as e:
+        print(f"ARPEGE Error: {e}")
+
+    print("\n" + "-" * 50)
+    print("Download process completed.")
 
 if __name__ == "__main__":
-    run_pipeline()
+    main()
