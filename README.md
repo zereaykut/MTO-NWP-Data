@@ -12,6 +12,7 @@ It provides a unified interface and command-line tools to download GRIB2 data fr
     * **GFS:** Supports both NOMADS (live) and AWS S3 (archive) sources.
     * **ECMWF:** Access to the new Open Data API, including the AIFS (Artificial Intelligence Forecasting System).
     * **ICON:** Granular variable selection to save bandwidth.
+    * **ARPAGE:** High-resolution weather model data from Meteo-France..
 * **Smart Run Detection:** Auto-detects the latest available model run times to ensure data freshness.
 
 ## 📂 Directory Structure
