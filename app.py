@@ -42,20 +42,20 @@ def main():
     # ---------------------------------------------------------
     # 2. ECMWF Example
     # ---------------------------------------------------------
-    print("\n>>> Fetching ECMWF (IFS 0.4°)...")
+    print("\n>>> Fetching ECMWF (IFS 0.25°)...")
     try:
-        # ECMWF Open Data usually runs 00, 06, 12, 18.
-        # We explicitly calculate a run time for demonstration.
-        # (Subtract 6 hours to ensure data availability on their server)
-        safe_run_time = now - dt.timedelta(hours=6)
+        # ECMWF Open Data runs: 00, 06, 12, 18 UTC.
+        # We calculate the latest available run.
+        # (Subtracting 7-8 hours is usually safer to ensure upload completion)
+        safe_run_time = now - dt.timedelta(hours=7)
         floored_hour = (safe_run_time.hour // 6) * 6
         ecmwf_run = safe_run_time.replace(hour=floored_hour, minute=0, second=0, microsecond=0)
 
         download_ecmwf(
-            domain="ifs04",
+            domain="ifs025",        # Changed from 'ifs04' to match your 0.25° links
             output_dir=base_dir / "ecmwf",
             run=ecmwf_run,
-            max_forecast_hour=3      # Keep it small
+            max_forecast_hour=3     # Keep it small for testing
         )
     except Exception as e:
         print(f"ECMWF Error: {e}")
@@ -65,17 +65,22 @@ def main():
     # ---------------------------------------------------------
     print("\n>>> Fetching ICON (Global)...")
     try:
-        # ICON global runs 00, 06, 12, 18
-        icon_run = now - dt.timedelta(hours=4) # Small buffer
-        floored_hour = (icon_run.hour // 6) * 6
-        icon_run = icon_run.replace(hour=floored_hour, minute=0, second=0, microsecond=0)
-
+        # Download Surface Data
         download_icon(
-            domain="icon",
-            run=icon_run,
-            variables=["temperature_2m", "cloud_cover"], # Only specific vars
-            output_dir=base_dir / "icon",
-            max_steps=2 # Only first 2 steps
+            run=dt.datetime(2026, 1, 31, 0, 0, 0, tzinfo=dt.timezone.utc),
+            variables=["t_2m", "u_10m", "v_10m", "tot_prec", "pmsl"],
+            output_dir=Path("./weather_data/icon/single-level"),
+            steps=[0, 1, 2, 3]
+        )
+
+        # Download 850hPa Temperature
+        download_icon(
+            run=dt.datetime(2026, 1, 31, 0, 0, 0, tzinfo=dt.timezone.utc),
+            variables=["t"],
+            output_dir=Path("./weather_data/icon/pressure-level-temperature"),
+            steps=[0, 3, 6],
+            level_type="pressure-level",
+            level=850   # 1000, 950, 850, 700, 500, 250, 200
         )
     except Exception as e:
         print(f"ICON Error: {e}")

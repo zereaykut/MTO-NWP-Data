@@ -1,136 +1,192 @@
 #!/usr/bin/env python3
 """
-ICON Downloader Component (DWD Open Data)
+ICON-EU Downloader (DWD Open Data)
+Target: https://opendata.dwd.de/weather/nwp/icon-eu/grib/
 """
 
 import argparse
+import bz2
 import datetime as dt
+import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Optional
 import requests
 
 # -------------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------------
 
-ICON_DOMAINS: Dict[str, Dict[str, str]] = {
-    "icon": {"path": "icon", "region": "global", "grid_type": "icosahedral"},
-    "icon-eu": {"path": "icon-eu", "region": "europe", "grid_type": "regular-lat-lon"},
-    "icon-d2": {"path": "icon-d2", "region": "germany", "grid_type": "regular-lat-lon"},
-}
-
-ICON_SURFACE_VARIABLES: Dict[str, Dict[str, object]] = {
-    "temperature_2m": {"param": "t_2m", "cat": "single-level", "level": None},
-    "precipitation": {"param": "tot_prec", "cat": "single-level", "level": None},
-    "cloud_cover": {"param": "clct", "cat": "single-level", "level": None},
-    "wind_u_component_10m": {"param": "u_10m", "cat": "single-level", "level": None},
-    "wind_v_component_10m": {"param": "v_10m", "cat": "single-level", "level": None},
-}
+# Base URL for DWD Open Data ICON-EU GRIB
+BASE_URL = "https://opendata.dwd.de/weather/nwp/icon-eu/grib"
 
 # -------------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------------
 
-def get_download_forecast_steps(domain_key: str, run_hour: int) -> List[int]:
-    if domain_key == "icon":
-        if run_hour in (6, 18):
-            return list(range(0, 79)) + list(range(81, 121, 3))
-        else:
-            return list(range(0, 79)) + list(range(81, 181, 3))
+def get_latest_run(now: Optional[dt.datetime] = None) -> dt.datetime:
+    """
+    Calculates the latest available ICON-EU run.
+    Runs are at 00, 06, 12, 18 UTC.
+    Data is typically available ~3.5 hours after run time.
+    """
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
     
-    if domain_key == "icon-eu":
-        if run_hour % 6 == 0:
-            return list(range(0, 79)) + list(range(81, 121, 3))
-        return list(range(0, 31))
+    # Heuristic: Go back 4 hours to be safe, then floor to 6h
+    safe_time = now - dt.timedelta(hours=4)
+    hour = (safe_time.hour // 6) * 6
+    return safe_time.replace(hour=hour, minute=0, second=0, microsecond=0)
 
-    if domain_key == "icon-d2":
-        return list(range(0, 49))
-        
-    raise ValueError(f"Unsupported domain: {domain_key}")
+def build_dwd_url(
+    run: dt.datetime,
+    var: str,
+    step: int,
+    level_type: str = "single-level",
+    level: Optional[int] = None
+) -> str:
+    """
+    Constructs the DWD Open Data URL.
+    
+    Format:
+    Base/{run_hour}/{var_lower}/icon-eu_europe_regular-lat-lon_{level_type}_{date}{run}_{step}_{level?}_{VAR_UPPER}.grib2.bz2
+    """
+    run_hour = f"{run.hour:02d}"
+    date_str = run.strftime("%Y%m%d")
+    date_run = f"{date_str}{run_hour}"
+    
+    # Variable directory is usually lowercase (e.g., t_2m)
+    var_dir = var.lower()
+    
+    # Variable in filename is usually uppercase (e.g., T_2M)
+    var_file = var.upper()
+    
+    step_str = f"{step:03d}"
+    
+    # Construct filename parts
+    # Prefix: icon-eu_europe_regular-lat-lon
+    prefix = "icon-eu_europe_regular-lat-lon"
+    
+    if level is not None:
+        # Pressure/Model level format: ..._pressure-level_2026013100_000_1000_T.grib2.bz2
+        # Note: Level comes BEFORE variable in filename
+        filename = f"{prefix}_{level_type}_{date_run}_{step_str}_{level}_{var_file}.grib2.bz2"
+    else:
+        # Single level format: ..._single-level_2026013100_000_T_2M.grib2.bz2
+        filename = f"{prefix}_{level_type}_{date_run}_{step_str}_{var_file}.grib2.bz2"
 
-def build_icon_url(domain_key: str, run_time: dt.datetime, step_hour: int, var_key: str) -> str:
-    domain_conf = ICON_DOMAINS[domain_key]
-    var_conf = ICON_SURFACE_VARIABLES[var_key]
-    
-    domain_path = domain_conf["path"]
-    region = domain_conf["region"]
-    grid = domain_conf["grid_type"]
-    param = var_conf["param"]
-    cat = var_conf["cat"]
-    
-    # Example: icon-eu_europe_regular-lat-lon_single-level_2025120112_005_t_2m.grib2.bz2
-    domain_prefix = f"{domain_path}_{region}"
-    date_str = run_time.strftime("%Y%m%d%H")
-    step_str = f"{step_hour:03d}"
-    
-    filename = f"{domain_prefix}_{grid}_{cat}_{date_str}_{step_str}_{param}.grib2.bz2"
-    
-    # URL structure: .../grib/HH/param/filename
-    server = f"https://opendata.dwd.de/weather/nwp/{domain_path}/grib/{run_time.hour:02d}/{param}"
-    return f"{server}/{filename}"
+    url = f"{BASE_URL}/{run_hour}/{var_dir}/{filename}"
+    return url
 
 # -------------------------------------------------------------------------
 # Core Logic
 # -------------------------------------------------------------------------
 
 def download_icon(
-    domain: str,
     run: dt.datetime,
     variables: List[str],
     output_dir: Path,
-    max_steps: Optional[int] = None
+    steps: List[int],
+    level_type: str = "single-level",
+    level: Optional[int] = None
 ):
-    if domain not in ICON_DOMAINS:
-        raise ValueError(f"Unknown domain {domain}")
-    
+    """
+    Downloads and decompresses ICON data.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    steps = get_download_forecast_steps(domain, run.hour)
-    if max_steps:
-        steps = steps[:max_steps]
-        
-    print(f"[ICON] Domain={domain} Run={run.strftime('%Y%m%d%H')} Vars={len(variables)}")
-    
+
     session = requests.Session()
+
+    print(f"[ICON] Target: {run.isoformat()} | Vars: {variables}")
+    print(f"[ICON] Steps:  {steps}")
     
+    if level:
+        print(f"[ICON] Level:  {level} ({level_type})")
+
     for var in variables:
-        if var not in ICON_SURFACE_VARIABLES:
-            print(f"  [WARN] Skipping unknown variable: {var}")
-            continue
-            
         for step in steps:
-            url = build_icon_url(domain, run, step, var)
-            fname = url.split("/")[-1]
-            out_path = output_dir / fname
+            url = build_dwd_url(run, var, step, level_type, level)
             
+            # Output filename (remove .bz2 extension for the local file)
+            # We standardize the local name to be simpler:
+            # icon-eu_YYYYMMDDHH_step_var[_level].grib2
+            if level:
+                fname = f"icon-eu_{run.strftime('%Y%m%d%H')}_{step:03d}_{var}_{level}.grib2"
+            else:
+                fname = f"icon-eu_{run.strftime('%Y%m%d%H')}_{step:03d}_{var}.grib2"
+                
+            out_path = output_dir / fname
+
             if out_path.exists():
                 print(f"  [SKIP] {fname}")
                 continue
-                
-            print(f"  [DOWN] {fname}")
+
+            print(f"  [DOWN] {fname}") #  <- {url}
+            
             try:
-                with session.get(url, stream=True, timeout=20) as r:
+                with session.get(url, stream=True, timeout=30) as r:
+                    if r.status_code == 404:
+                        print(f"  [404 ] Not Found: {url}")
+                        continue
                     r.raise_for_status()
+                    
+                    # DWD sends .bz2. We decompress on the fly.
+                    decompressor = bz2.BZ2Decompressor()
+                    
                     with open(out_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
+                        for chunk in r.iter_content(chunk_size=16384):
+                            if chunk:
+                                try:
+                                    data = decompressor.decompress(chunk)
+                                    f.write(data)
+                                except OSError as e:
+                                    # Handle case where stream might end or be corrupt
+                                    print(f"  [ERR ] Decompression error: {e}")
+                                    break
+                                    
             except Exception as e:
-                print(f"  [ERR] {e}")
+                print(f"  [ERR ] Failed: {e}")
+                if out_path.exists():
+                    out_path.unlink()
 
 # -------------------------------------------------------------------------
 # CLI Support
 # -------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--domain", required=True, choices=ICON_DOMAINS.keys())
-    parser.add_argument("--run", required=True, help="YYYYMMDDHH")
-    parser.add_argument("--variables", required=True, help="comma separated")
-    parser.add_argument("--out", required=True)
+    parser = argparse.ArgumentParser(description="ICON-EU Downloader (DWD)")
+    parser.add_argument("--run", type=str, help="YYYYMMDDHH (e.g., 2026013100)")
+    parser.add_argument("--vars", required=True, help="Comma separated (e.g., t_2m,u_10m,tot_prec)")
+    parser.add_argument("--outdir", required=True, help="Output directory")
+    parser.add_argument("--steps", type=str, default="0-72-3", help="Start-End-Step (e.g., 0-12-1 or 0,1,2,3)")
+    
+    # Advanced Options for 3D variables
+    parser.add_argument("--level-type", default="single-level", choices=["single-level", "pressure-level", "model-level"])
+    parser.add_argument("--level", type=int, help="Level value (e.g., 1000, 850, 500). Required for pressure-level.")
+
     args = parser.parse_args()
-    
-    r_dt = dt.datetime.strptime(args.run, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc)
-    vars_list = [v.strip() for v in args.variables.split(",") if v.strip()]
-    
-    download_icon(args.domain, r_dt, vars_list, Path(args.out))
+
+    # Parse Run Time
+    if args.run:
+        run_dt = dt.datetime.strptime(args.run, "%Y%m%d%H").replace(tzinfo=dt.timezone.utc)
+    else:
+        run_dt = get_latest_run()
+
+    # Parse Variables
+    var_list = [v.strip() for v in args.vars.split(",") if v.strip()]
+
+    # Parse Steps
+    if "-" in args.steps:
+        start, end, step_sz = map(int, args.steps.split("-"))
+        step_list = list(range(start, end + 1, step_sz))
+    else:
+        step_list = [int(x) for x in args.steps.split(",")]
+
+    download_icon(
+        run=run_dt,
+        variables=var_list,
+        output_dir=Path(args.outdir),
+        steps=step_list,
+        level_type=args.level_type,
+        level=args.level
+    )
